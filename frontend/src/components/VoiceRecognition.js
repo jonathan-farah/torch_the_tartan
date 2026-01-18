@@ -25,7 +25,8 @@ const VoiceRecognition = () => {
       };
 
       mediaRecorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        // Use the browser's native format instead of forcing WAV
+        const blob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
         setAudioBlob(blob);
         stream.getTracks().forEach(track => track.stop());
       };
@@ -60,7 +61,7 @@ const VoiceRecognition = () => {
       reader.onloadend = async () => {
         const base64Audio = reader.result;
 
-        const response = await axios.post('/api/analyze-voice', {
+        const response = await axios.post('http://localhost:5000/api/analyze-voice', {
           audio: base64Audio,
           context: context
         });
@@ -152,34 +153,73 @@ const VoiceRecognition = () => {
         </div>
       )}
 
-      {result && (
+      {result && result.actors && result.actors.length > 0 && (
         <div className="results">
-          <h3>🎭 Analysis Results</h3>
-          <div className="result-card">
-            <div className="result-item">
-              <strong>Voice Actor:</strong>
-              <span>{result.voice_actor.name}</span>
+          {result.cached && (
+            <div className="cache-badge">
+              ⚡ Retrieved from cache (accessed {result.cache_hits} times)
             </div>
-            <div className="result-item">
-              <strong>Confidence:</strong>
-              <span>{(result.voice_actor.confidence * 100).toFixed(1)}%</span>
+          )}
+          
+          {result.total_speakers > 1 && (
+            <div className="speakers-count">
+              🎙️ {result.total_speakers} speakers detected
             </div>
-            {result.voice_actor.reasoning && (
-              <div className="result-item">
-                <strong>Analysis:</strong>
-                <p>{result.voice_actor.reasoning}</p>
+          )}
+          
+          {result.actors.map((actor, index) => (
+            <div key={index} className="actor-profile" style={{marginBottom: '2rem'}}>
+              <div className="profile-header">
+                <div className="profile-image-container">
+                  <img 
+                    src={actor.actor_photo || `https://ui-avatars.com/api/?name=${encodeURIComponent(actor.name)}&size=200&background=667eea&color=fff&bold=true`}
+                    alt={actor.name}
+                    className="profile-image"
+                    onError={(e) => {
+                      e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(actor.name)}&size=200&background=667eea&color=fff&bold=true`;
+                    }}
+                  />
+                  <div className="confidence-badge">
+                    {(actor.confidence * 100).toFixed(0)}% Match
+                  </div>
+                  {index === 0 && result.total_speakers > 1 && (
+                    <div className="primary-badge">Primary</div>
+                  )}
+                </div>
+                
+                <div className="profile-info">
+                  <h2 className="actor-name">{actor.name}</h2>
+                  <p className="actor-title">
+                    {actor.voice_characteristics || 'Voice Actor / Performer'}
+                  </p>
+                  
+                  {actor.bio && (
+                    <p className="actor-bio">{actor.bio}</p>
+                  )}
+                </div>
               </div>
-            )}
-            {result.voice_actor.note && (
-              <div className="note">
-                <strong>Note:</strong> {result.voice_actor.note}
+
+              <div className="profile-section">
+                <h3 className="section-title">🎬 Notable Projects</h3>
+                {actor.notable_projects && actor.notable_projects.length > 0 ? (
+                  <div className="projects-grid">
+                    {actor.notable_projects.map((project, projIndex) => (
+                      <div key={projIndex} className="project-card">
+                        <div className="project-icon">🎭</div>
+                        <div className="project-name">{project}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="no-data">No notable projects available</p>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          ))}
 
           {result.features && (
             <details className="features-details">
-              <summary>📊 Audio Features</summary>
+              <summary>📊 Audio Analysis Details</summary>
               <div className="features-grid">
                 {Object.entries(result.features).map(([key, value]) => (
                   <div key={key} className="feature-item">

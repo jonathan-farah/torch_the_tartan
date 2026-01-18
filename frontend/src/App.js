@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import './App.css';
 import VoiceRecognition from './components/VoiceRecognition';
 import FaceRecognition from './components/FaceRecognition';
+import SceneInterpretation from './components/SceneInterpretation';
+import MusicIdentification from './components/MusicIdentification';
 
 function App() {
   const [activeTab, setActiveTab] = useState('voice');
@@ -27,10 +29,25 @@ function App() {
           >
             📸 Face Recognition
           </button>
+          <button
+            className={`tab ${activeTab === 'scene' ? 'active' : ''}`}
+            onClick={() => setActiveTab('scene')}
+          >
+            🎬 Scene Interpretation
+          </button>
+          <button
+            className={`tab ${activeTab === 'music' ? 'active' : ''}`}
+            onClick={() => setActiveTab('music')}
+          >
+            🎵 Music ID
+          </button>
         </div>
 
         <div className="content">
-          {activeTab === 'voice' ? <VoiceRecognition /> : <FaceRecognition />}
+          {activeTab === 'voice' && <VoiceRecognition />}
+          {activeTab === 'face' && <FaceRecognition />}
+          {activeTab === 'scene' && <SceneInterpretation />}
+          {activeTab === 'music' && <MusicIdentification />}
         </div>
       </div>
 
