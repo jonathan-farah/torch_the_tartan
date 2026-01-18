@@ -90,13 +90,15 @@ const VoiceRecognition = () => {
       </p>
 
       <div className="input-section">
-        <label htmlFor="context">TV Show / Context (optional):</label>
+        <label htmlFor="context">
+          📺 What show/movie is this from? (IMPORTANT for accuracy):
+        </label>
         <input
           id="context"
           type="text"
           value={context}
           onChange={(e) => setContext(e.target.value)}
-          placeholder="e.g., The Simpsons, Breaking Bad..."
+          placeholder="e.g., Brooklyn Nine-Nine, The Simpsons, Breaking Bad..."
           className="context-input"
         />
       </div>

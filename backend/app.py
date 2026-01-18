@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import base64
 import io
+import json
 from datetime import datetime
 import time
 import numpy as np
@@ -131,8 +132,8 @@ def analyze_voice():
                 'cache_hits': cached_result['cache_hits']
             }), 200
         
-        # Use LLM to identify voice actor (placeholder for now)
-        voice_actor_info = identify_voice_actor_with_llm(features, context)
+        # Use LLM to identify voice actor (with transcription)
+        voice_actor_info = identify_voice_actor_with_llm(features, context, audio_path)
         
         # Handle multiple actors response
         actors = voice_actor_info.get('actors', [])
@@ -483,11 +484,12 @@ def extract_voice_features(audio, sample_rate):
     
     return features
 
-def identify_voice_actor_with_llm(features, context=''):
+def identify_voice_actor_with_llm(features, context='', audio_path=None):
     """
-    Use LLM to identify voice actor based on audio features and context
+    Use LLM to identify voice actor based on audio features, transcription, and context
     """
     from openai import OpenAI
+    import re
     
     openai_api_key = os.getenv('OPENAI_API_KEY')
     if not openai_api_key:
@@ -504,44 +506,120 @@ def identify_voice_actor_with_llm(features, context=''):
     
     client = OpenAI(api_key=openai_api_key)
     
-    prompt = f"""Based on the following voice characteristics and context, identify the voice actor(s) speaking in this audio clip.
+    # Normalize context - make case-insensitive and remove punctuation
+    normalized_context = re.sub(r'[^\w\s]', '', context.lower().strip()) if context else ''
+    
+    # Try to get speech transcription for better identification
+    transcription = ""
+    if audio_path and os.path.exists(audio_path):
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="text"
+                )
+                transcription = transcript if isinstance(transcript, str) else transcript.text
+                print(f"Transcription: {transcription}", flush=True)
+        except Exception as e:
+            print(f"Transcription failed: {e}", flush=True)
+            transcription = ""
+    
+    # Determine voice characteristics from features
+    pitch = features.get('mean_pitch', 0)
+    if pitch > 200:
+        pitch_desc = "very high-pitched (female or young voice)"
+    elif pitch > 165:
+        pitch_desc = "high-pitched (likely female)"
+    elif pitch > 130:
+        pitch_desc = "medium-high pitch (male or female)"
+    elif pitch > 100:
+        pitch_desc = "medium-low pitch (male)"
+    else:
+        pitch_desc = "very low-pitched (deep male voice)"
+    
+    energy_desc = "high energy/loud" if features.get('energy', 0) > 0.01 else "moderate energy"
+    
+    prompt = f"""You are analyzing an audio clip to identify ALL voice actors speaking. This is CRITICAL: there may be 2, 3, or more people talking.
 
-Audio Features:
-- Mean Pitch: {features.get('mean_pitch', 0):.2f} Hz
-- Pitch Variation: {features.get('pitch_std', 0):.2f} Hz
-- Spectral Centroid: {features.get('spectral_centroid_mean', 0):.2f} Hz
-- Energy Level: {features.get('energy', 0):.4f}
-- Tempo: {features.get('tempo', 0):.2f} BPM
+FULL TRANSCRIPTION:
+"{transcription if transcription else '[No clear speech detected]'}"
 
-Additional Context: {context if context else 'No additional context provided'}
+AUDIO FEATURES (Averaged across all speakers):
+- Average Pitch: {pitch:.1f} Hz ({pitch_desc})
+- Voice energy: {energy_desc}
 
-Please identify the voice actor(s) and return a JSON response with this exact format:
+SHOW/MOVIE CONTEXT: {context if context else 'Unknown'}
+Normalized: "{normalized_context if normalized_context else 'none'}"
+
+YOUR TASK - STEP BY STEP:
+1. READ the transcription CAREFULLY
+2. IDENTIFY how many different people are speaking by looking for:
+   - Dialogue exchanges (one person asks, another answers)
+   - Different speaking styles or sentence structures
+   - Shifts in topic that suggest a new speaker
+   - ANY indication this is a conversation vs monologue
+
+3. For EACH distinct speaker you detect:
+   - Look at what THAT SPECIFIC PERSON says
+   - Match their dialogue/character to the show context
+   - Identify which actor plays that character
+
+4. IMPORTANT: If you see ANY dialogue exchange or conversation:
+   - There are AT LEAST 2 speakers (probably more)
+   - Identify ALL of them, even if uncertain
+   - Use the show context to figure out which characters are present
+   - Match characters to their voice actors
+
+EXAMPLE: If transcription shows "Hey, what's going on?" followed by "Not much, just working", that's clearly 2+ people.
+
+For reference on voice types:
+- Very deep male voices (80-110 Hz): Terry Crews, Clancy Brown, Fred Tatasciore, James Earl Jones, Keith David
+- Deep/resonant: Clancy Brown is known for extremely deep, authoritative voice
+- Powerful/booming: Terry Crews has a strong, energetic deep voice
+- Versatile deep: Fred Tatasciore does many deep character voices
+
+Return JSON with EVERY speaker detected:
 {{
     "actors": [
         {{
             "name": "Actor Full Name",
-            "notable_projects": [
-                "Show/Movie - Character Name (Main Character/Recurring, Years)",
-                "Show/Movie - Character Name (Main Character/Recurring, Years)"
-            ],
-            "confidence": 0.85,
-            "voice_characteristics": "Description of their voice in this clip"
+            "notable_projects": ["Show - Character (Role, Years)"],
+            "confidence": 0.70,
+            "voice_characteristics": "This actor's specific voice",
+            "dialogue_sample": "What this specific actor said in the clip"
         }}
     ],
-    "total_speakers": 1
+    "total_speakers": 3,
+    "reasoning": "Brief explanation of how you detected multiple speakers"
 }}
 
-If you detect multiple distinct speakers, include all of them in the actors array.
-Only include real, verified information. If uncertain, indicate lower confidence."""
+REMEMBER: It's better to identify all potential speakers (even with lower confidence) than to miss someone who spoke!"""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an expert voice actor identification specialist. Analyze audio features and context to identify voice actors with high accuracy. Always return valid JSON."},
+                {"role": "system", "content": """You are an expert at identifying multiple voice actors from audio transcriptions. Your specialty is detecting when 2, 3, or more people are speaking and identifying each one.
+
+CRITICAL SKILLS:
+- Analyze dialogue patterns to count speakers (back-and-forth = multiple people)
+- Match dialogue content to characters from the show/movie context
+- Identify voice actors by character names
+- ALWAYS identify ALL speakers, never just one person from a conversation
+
+PROCESS:
+1. Count how many different people are speaking in the transcription
+2. Figure out which character each speaker is (from show context)
+3. Identify the voice actor for each character
+4. Return ALL of them with confidence scores
+
+Deep voice actors to know: Terry Crews (powerful/booming), Clancy Brown (authoritative/menacing), Fred Tatasciore (versatile character work), James Earl Jones, Keith David.
+
+Always return valid JSON with every speaker detected."""},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
+            temperature=0.2,
             response_format={"type": "json_object"}
         )
         
