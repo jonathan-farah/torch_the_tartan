@@ -16,18 +16,61 @@ const FaceRecognition = () => {
 
   const startCamera = async () => {
     try {
+      console.log('Requesting camera access...');
+      
+      // Set camera active FIRST so video element gets rendered
+      setCameraActive(true);
+      
+      // Wait for next render cycle so videoRef.current is available
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user' } 
+        video: { 
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
       });
+      
+      console.log('Camera stream obtained:', stream);
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
-        setCameraActive(true);
+        
+        // Ensure video plays
+        videoRef.current.onloadedmetadata = () => {
+          console.log('Video metadata loaded, attempting to play...');
+          videoRef.current.play()
+            .then(() => {
+              console.log('Video playing successfully');
+            })
+            .catch(err => {
+              console.error('Error playing video:', err);
+              alert('Video failed to play: ' + err.message);
+            });
+        };
+        
+        // Additional event listeners for debugging
+        videoRef.current.onplay = () => {
+          console.log('Video started playing');
+        };
+        
+        videoRef.current.onerror = (e) => {
+          console.error('Video error:', e);
+          alert('Video element error: ' + e.message);
+        };
+        
+        console.log('Camera activated');
+      } else {
+        console.error('Video ref is still null after waiting');
+        alert('Video element not found - please try again');
+        setCameraActive(false);
       }
     } catch (error) {
       console.error('Error accessing camera:', error);
-      alert('Could not access camera. Please check permissions.');
+      setCameraActive(false);
+      alert('Could not access camera: ' + error.message + '\n\nPlease:\n1. Allow camera permissions\n2. Close other apps using the camera\n3. Check camera privacy settings');
     }
   };
 
@@ -54,6 +97,38 @@ const FaceRecognition = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
+
+    // Flash effect
+    const flashOverlay = document.createElement('div');
+    flashOverlay.style.position = 'fixed';
+    flashOverlay.style.top = '0';
+    flashOverlay.style.left = '0';
+    flashOverlay.style.width = '100vw';
+    flashOverlay.style.height = '100vh';
+    flashOverlay.style.backgroundColor = 'white';
+    flashOverlay.style.opacity = '0';
+    flashOverlay.style.transition = 'opacity 0.15s';
+    flashOverlay.style.pointerEvents = 'none';
+    flashOverlay.style.zIndex = '9999';
+    document.body.appendChild(flashOverlay);
+
+    // Trigger flash
+    setTimeout(() => {
+      flashOverlay.style.opacity = '0.8';
+    }, 10);
+
+    setTimeout(() => {
+      flashOverlay.style.opacity = '0';
+    }, 150);
+
+    setTimeout(() => {
+      document.body.removeChild(flashOverlay);
+    }, 300);
+
+    // Play camera shutter sound
+    const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUqjl8bllHQU2k9n1yn0vBSh+zPLaizsKD2S57OynWBUIR6Lh8r1wIgUsgs7y2Ik2CBxqvfDknE4MDlKo5fG5ZR0FNpPZ9cp9LwUofszy2os7Cg9kuezsqFkVCEii4fK9cCIFLILO8tmJNggcar3w5JxODA5SqOXxuWUdBTaT2fXKfS8FKH7M8tqLOwoQZLns7KlZFQhIouHyvXAiBSyCzvLZiTYIHGq98OScTgwOUqjl8bllHQU2k9n1yn0vBSh+zPLaizsKEGS57OypWRUISQL=');
+    audio.volume = 0.3;
+    audio.play().catch(() => {}); // Ignore if audio fails
 
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -92,7 +167,7 @@ const FaceRecognition = () => {
       reader.onloadend = async () => {
         const base64Image = reader.result;
 
-        const response = await axios.post('/api/analyze-face', {
+        const response = await axios.post('http://localhost:5000/api/analyze-face', {
           image: base64Image
         });
 
@@ -151,11 +226,16 @@ const FaceRecognition = () => {
                 🔴 Live Detection Active
               </div>
             )}
+            <div className="camera-active-badge">
+              📹 Camera Active
+            </div>
             <video
               ref={videoRef}
               autoPlay
               playsInline
-              className="video-preview"
+              muted
+              className="video-preview video-preview-active"
+              style={{ display: 'block' }}
             />
             <div className="video-controls">
               <button onClick={capturePhoto} className="btn btn-capture">

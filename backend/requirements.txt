@@ -16,6 +16,7 @@ pandas>=2.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 openai>=2.0.0
+shazamio>=0.6.0
 
 # Optional: Uncomment when ready to integrate
 # anthropic>=0.8.1

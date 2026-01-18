@@ -80,7 +80,14 @@ const MusicIdentification = () => {
                 setResult(response.data);
             };
         } catch (err) {
-            setError('Music identification failed: ' + (err.response?.data?.error || err.message));
+            const errorMessage = err.response?.data?.message || err.response?.data?.error || err.message;
+            const statusCode = err.response?.status;
+            
+            if (statusCode === 503) {
+                setError(`🔒 Service Unavailable: ${errorMessage}`);
+            } else {
+                setError('Music identification failed: ' + errorMessage);
+            }
         } finally {
             setLoading(false);
         }

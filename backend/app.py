@@ -96,41 +96,8 @@ def analyze_voice():
         # Extract audio features
         features = extract_voice_features(y, sr)
         
-        # Check cache first
+        # Get context
         context = data.get('context', '')
-        cached_result = database.get_cached_voice_result(features, context)
-        
-        if cached_result:
-            # Return cached result - convert to new multi-actor format
-            actors = [{
-                'name': cached_result['actor_name'],
-                'notable_projects': cached_result['notable_projects'],
-                'confidence': cached_result['confidence']
-            }]
-            
-            os.remove(audio_path)
-            
-            # Calculate latency
-            latency_ms = (time.time() - start_time) * 1000
-            
-            # Log to Phoenix
-            phoenix_monitor.log_voice_prediction(
-                features=features,
-                prediction=cached_result['actor_name'],
-                confidence=cached_result['confidence'],
-                context=context,
-                cached=True,
-                latency_ms=latency_ms
-            )
-            
-            return jsonify({
-                'success': True,
-                'actors': actors,
-                'total_speakers': 1,
-                'features': features,
-                'cached': True,
-                'cache_hits': cached_result['cache_hits']
-            }), 200
         
         # Use LLM to identify voice actor (with transcription)
         voice_actor_info = identify_voice_actor_with_llm(features, context, audio_path)
@@ -178,12 +145,11 @@ def analyze_voice():
             'success': True,
             'actors': actors,
             'total_speakers': len(actors),
-            'features': features,
-            'cached': False
+            'features': features
         }), 200
-        
+    
     except Exception as e:
-        # Clean up audio file if it exists
+        # Clean up on error
         if 'audio_path' in locals() and os.path.exists(audio_path):
             os.remove(audio_path)
         
@@ -202,17 +168,26 @@ def analyze_face():
     start_time = time.time()
     
     try:
+        print("=== FACE ANALYSIS START ===", flush=True)
         data = request.json
+        print(f"Received data keys: {data.keys() if data else 'None'}", flush=True)
         
         if 'image' not in data:
+            print("ERROR: No image data provided", flush=True)
             return jsonify({'error': 'No image data provided'}), 400
         
+        print("Decoding base64 image...", flush=True)
         # Decode base64 image
         image_data = base64.b64decode(data['image'].split(',')[1] if ',' in data['image'] else data['image'])
+        print(f"Image data size: {len(image_data)} bytes", flush=True)
+        
         image = Image.open(io.BytesIO(image_data))
+        print(f"Image opened: {image.size} {image.mode}", flush=True)
         
         # Convert to numpy array for OpenCV
         image_array = np.array(image)
+        print(f"Image array shape: {image_array.shape}", flush=True)
+        
         if len(image_array.shape) == 2:  # Grayscale
             image_array = cv2.cvtColor(image_array, cv2.COLOR_GRAY2BGR)
         elif image_array.shape[2] == 4:  # RGBA
@@ -220,14 +195,29 @@ def analyze_face():
         elif image_array.shape[2] == 3:  # RGB
             image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
         
+        print("Image converted to BGR", flush=True)
+        
         # Save temporary file
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         image_path = os.path.join(UPLOAD_FOLDER, f'face_{timestamp}.jpg')
+        print(f"Saving image to: {image_path}", flush=True)
         cv2.imwrite(image_path, image_array)
+        print("Image saved", flush=True)
         
         # Detect faces using computer vision
-        detector = get_detector()
+        print("Getting face detector...", flush=True)
+        try:
+            detector = get_detector()
+            print("Face detector obtained successfully", flush=True)
+        except Exception as detector_error:
+            print(f"ERROR getting detector: {type(detector_error).__name__}: {str(detector_error)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        print("Detecting faces...", flush=True)
         detected_faces = detector.detect_faces(image_array)
+        print(f"Detected {len(detected_faces)} faces", flush=True)
         
         if not detected_faces:
             os.remove(image_path)
@@ -244,6 +234,7 @@ def analyze_face():
         identified_people = []
         for face in detected_faces:
             person_info = identify_person_from_face_features(face, image_array)
+            
             identified_people.append({
                 'name': person_info['name'],
                 'notable_projects': person_info['notable_projects'],
@@ -257,18 +248,16 @@ def analyze_face():
         annotated_base64 = detector.encode_image_to_base64(annotated_image)
         
         # Cache all identified people
-        for person in identified_people:
-            # Create simple features dict for caching
-            cache_features = {
-                'bbox': str(person['bbox']),
-                'face_confidence': person['face_confidence']
-            }
-            database.cache_face_result(
-                cache_features,
-                person['name'],
-                person['notable_projects'],
-                person['confidence']
-            )
+        for idx, person in enumerate(identified_people):
+            # Use the features from the identification
+            person_info = identify_person_from_face_features(detected_faces[idx], image_array)
+            if 'features' in person_info:
+                database.cache_face_result(
+                    person_info['features'],
+                    person['name'],
+                    person['notable_projects'],
+                    person['confidence']
+                )
         
         # Calculate latency
         latency_ms = (time.time() - start_time) * 1000
@@ -293,8 +282,7 @@ def analyze_face():
             'face_count': len(detected_faces),
             'faces': detected_faces,
             'landmarks': landmarks_data,
-            'annotated_image': f'data:image/jpeg;base64,{annotated_base64}',
-            'cached': False
+            'annotated_image': f'data:image/jpeg;base64,{annotated_base64}'
         }), 200
         
     except Exception as e:
@@ -540,86 +528,80 @@ def identify_voice_actor_with_llm(features, context='', audio_path=None):
     
     energy_desc = "high energy/loud" if features.get('energy', 0) > 0.01 else "moderate energy"
     
-    prompt = f"""You are analyzing an audio clip to identify ALL voice actors speaking. This is CRITICAL: there may be 2, 3, or more people talking.
+    prompt = f"""You are analyzing an audio clip to identify the voice actors speaking. 
 
-FULL TRANSCRIPTION:
+TRANSCRIPTION:
 "{transcription if transcription else '[No clear speech detected]'}"
 
-AUDIO FEATURES (Averaged across all speakers):
+AUDIO FEATURES:
 - Average Pitch: {pitch:.1f} Hz ({pitch_desc})
-- Voice energy: {energy_desc}
+- Energy: {energy_desc}
 
 SHOW/MOVIE CONTEXT: {context if context else 'Unknown'}
-Normalized: "{normalized_context if normalized_context else 'none'}"
 
-YOUR TASK - STEP BY STEP:
-1. READ the transcription CAREFULLY
-2. IDENTIFY how many different people are speaking by looking for:
-   - Dialogue exchanges (one person asks, another answers)
-   - Different speaking styles or sentence structures
-   - Shifts in topic that suggest a new speaker
-   - ANY indication this is a conversation vs monologue
+CRITICAL INSTRUCTIONS:
+1. Analyze the transcription to determine HOW MANY distinct speakers are present
+   - Look for dialogue patterns (questions and answers indicate different speakers)
+   - A conversation with back-and-forth indicates 2 people
+   - Single perspective/monologue is usually 1 person
+   
+2. Count conservatively - only report speakers you can CLEARLY distinguish
+   - If unclear, prefer fewer speakers with higher confidence
+   - Don't add extra speakers just because dialogue mentions other names
+   
+3. Match EACH speaker to their character (if context provided) and identify the voice actor
 
-3. For EACH distinct speaker you detect:
-   - Look at what THAT SPECIFIC PERSON says
-   - Match their dialogue/character to the show context
-   - Identify which actor plays that character
+4. Quality over quantity: Better to correctly identify 2 speakers than incorrectly list 3
 
-4. IMPORTANT: If you see ANY dialogue exchange or conversation:
-   - There are AT LEAST 2 speakers (probably more)
-   - Identify ALL of them, even if uncertain
-   - Use the show context to figure out which characters are present
-   - Match characters to their voice actors
+For voice recognition:
+- Terry Crews: Powerful, booming deep voice (~100-120 Hz)
+- Clancy Brown: Authoritative, menacing deep voice (~85-110 Hz)
+- Fred Tatasciore: Versatile deep character voice (~90-115 Hz)
+- Steven Yeun: Medium pitch, conversational Korean-American voice (~120-140 Hz)
+- J.K. Simmons: Distinctive sharp, assertive voice (~110-130 Hz)
 
-EXAMPLE: If transcription shows "Hey, what's going on?" followed by "Not much, just working", that's clearly 2+ people.
-
-For reference on voice types:
-- Very deep male voices (80-110 Hz): Terry Crews, Clancy Brown, Fred Tatasciore, James Earl Jones, Keith David
-- Deep/resonant: Clancy Brown is known for extremely deep, authoritative voice
-- Powerful/booming: Terry Crews has a strong, energetic deep voice
-- Versatile deep: Fred Tatasciore does many deep character voices
-
-Return JSON with EVERY speaker detected:
+Return JSON with ALL speakers (but only ones you're confident about):
 {{
     "actors": [
         {{
             "name": "Actor Full Name",
             "notable_projects": ["Show - Character (Role, Years)"],
-            "confidence": 0.70,
-            "voice_characteristics": "This actor's specific voice",
-            "dialogue_sample": "What this specific actor said in the clip"
+            "confidence": 0.75,
+            "voice_characteristics": "Brief description",
+            "likely_lines": "Approximate lines this actor spoke"
         }}
     ],
-    "total_speakers": 3,
-    "reasoning": "Brief explanation of how you detected multiple speakers"
-}}
-
-REMEMBER: It's better to identify all potential speakers (even with lower confidence) than to miss someone who spoke!"""
+    "total_speakers": 2,
+    "reasoning": "How you determined the speaker count and identities"
+}}"""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": """You are an expert at identifying multiple voice actors from audio transcriptions. Your specialty is detecting when 2, 3, or more people are speaking and identifying each one.
+                {"role": "system", "content": """You are an expert at identifying voice actors from audio transcriptions and context.
 
-CRITICAL SKILLS:
-- Analyze dialogue patterns to count speakers (back-and-forth = multiple people)
-- Match dialogue content to characters from the show/movie context
-- Identify voice actors by character names
-- ALWAYS identify ALL speakers, never just one person from a conversation
+KEY PRINCIPLES:
+- Accuracy over quantity: Correctly identify the actual speakers present
+- Count conservatively: Only report speakers you can clearly distinguish
+- Use show context to match characters to voice actors
+- Consider dialogue patterns: back-and-forth usually means 2 speakers, not 3+
+- Don't invent extra speakers - if you hear 2, report 2
 
-PROCESS:
-1. Count how many different people are speaking in the transcription
-2. Figure out which character each speaker is (from show context)
-3. Identify the voice actor for each character
-4. Return ALL of them with confidence scores
+VOICE ACTOR DATABASE (with typical pitch ranges):
+- Steven Yeun (Invincible): Medium, conversational (~120-140 Hz)
+- J.K. Simmons (Omni-Man): Sharp, assertive, commanding (~110-130 Hz)
+- Sandra Oh (Debbie): Female, expressive (~180-220 Hz)
+- Zazie Beetz (Amber): Female, warm (~170-210 Hz)
+- Clancy Brown: Deep, authoritative (~85-110 Hz) - often villains
+- Terry Crews: Powerful, booming deep voice (~100-120 Hz)
+- Fred Tatasciore: Versatile deep character voice (~90-115 Hz)
+- Walton Goggins: Distinctive Southern drawl (~115-135 Hz)
 
-Deep voice actors to know: Terry Crews (powerful/booming), Clancy Brown (authoritative/menacing), Fred Tatasciore (versatile character work), James Earl Jones, Keith David.
-
-Always return valid JSON with every speaker detected."""},
+Always return valid JSON. Be precise with speaker count."""},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,
+            temperature=0.1,
             response_format={"type": "json_object"}
         )
         
@@ -661,8 +643,7 @@ Always return valid JSON with every speaker detected."""},
 
 def identify_person_from_face_features(detected_face: dict, image_array: np.ndarray) -> dict:
     """
-    Identify person from detected face features
-    This is a placeholder - integrate with actual face recognition database
+    Identify person from detected face features using OpenAI Vision API with caching
     
     Args:
         detected_face: face detection results with bbox and features
@@ -671,13 +652,10 @@ def identify_person_from_face_features(detected_face: dict, image_array: np.ndar
     Returns:
         Person information with notable projects
     """
-    # TODO: Integrate with face_recognition library or facial recognition API
-    # For now, return enhanced mock response with real CV features
-    
     face_features = detected_face['features']
     bbox = detected_face['bbox']
     
-    # Combine detection features with additional image features
+    # Combine detection features with additional image features for caching
     image_features = {
         'dimensions': f"{image_array.shape[1]}x{image_array.shape[0]}",
         'face_confidence': detected_face['confidence'],
@@ -688,18 +666,76 @@ def identify_person_from_face_features(detected_face: dict, image_array: np.ndar
         'aspect_ratio': float(image_array.shape[1] / image_array.shape[0])
     }
     
-    return {
-        'name': 'Bryan Cranston',
-        'notable_projects': [
-            'Breaking Bad - Walter White (Main Character, 2008-2013)',
-            'Malcolm in the Middle - Hal (Main Character, 2000-2006)',
-            'Your Honor - Michael Desiato (Main Character, 2020-2023)',
-            'Seinfeld - Tim Whatley (Recurring, 1995-1997)'
-        ],
-        'confidence': float(detected_face['confidence']),
-        'features': image_features,
-        'note': 'Real face detection active! To enable actor identification, integrate with face recognition database.'
-    }
+    # Use OpenAI Vision API to identify person
+    try:
+        # Extract face region from image
+        x, y, w, h = bbox['x'], bbox['y'], bbox['width'], bbox['height']
+        face_crop = image_array[y:y+h, x:x+w]
+        
+        # Convert to PIL Image and encode to base64
+        from PIL import Image
+        face_pil = Image.fromarray(cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB))
+        
+        import io
+        buffered = io.BytesIO()
+        face_pil.save(buffered, format="JPEG")
+        import base64
+        face_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        # Call OpenAI Vision API
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Identify this person. Provide their name and list their most notable TV shows and movies with character names and years. Format as: Name, then bullet points of 'Title - Character (Type, Years)'. Be specific and accurate."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{face_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500
+        )
+        
+        identification = response.choices[0].message.content
+        
+        # Parse response to extract name and projects
+        lines = identification.strip().split('\n')
+        name = lines[0].strip()
+        projects = [line.strip('- •*').strip() for line in lines[1:] if line.strip() and line.strip().startswith(('-', '•', '*'))]
+        
+        # Clean up name (remove extra text like "This is...")
+        if ':' in name:
+            name = name.split(':')[-1].strip()
+        if '.' in name and len(name.split('.')[0]) < 30:
+            name = name.split('.')[0].strip()
+        
+        confidence = 0.85  # OpenAI Vision confidence estimate
+        
+        return {
+            'name': name,
+            'notable_projects': projects if projects else ['Information not available'],
+            'confidence': confidence,
+            'features': image_features
+        }
+        
+    except Exception as e:
+        print(f"Error identifying person with OpenAI Vision: {str(e)}", flush=True)
+        return {
+            'name': 'Unknown Person',
+            'notable_projects': ['Unable to identify - API error'],
+            'confidence': 0.0,
+            'features': image_features,
+            'error': str(e)
+        }
 
 def identify_person_from_face(image):
     """
@@ -740,16 +776,21 @@ def identify_music():
     start_time = time.time()
     
     try:
+        print("=== MUSIC IDENTIFICATION START ===")
         data = request.json
+        print(f"Received data keys: {data.keys()}")
         
         if 'audio' not in data:
             return jsonify({'error': 'No audio data provided'}), 400
         
         # Get audio data (base64 encoded)
         audio_base64 = data['audio']
+        print(f"Audio data size: {len(audio_base64)} chars")
         
         # Identify music with Shazam
+        print("Calling Shazam API...")
         result = shazam_client.identify_music(audio_base64)
+        print(f"Shazam result: {result}")
         
         # Calculate latency
         latency_ms = (time.time() - start_time) * 1000
@@ -787,14 +828,27 @@ def identify_music():
                 'latency_ms': latency_ms
             }), 200
         else:
+            # Check if it's a subscription error
+            error_msg = result.get('error', 'Unknown error')
+            message = result.get('message', '')
+            
+            if 'not subscribed' in message or '403' in error_msg:
+                return jsonify({
+                    'success': False,
+                    'error': 'Music identification service unavailable',
+                    'message': 'The Shazam API requires an active subscription. Please subscribe at https://rapidapi.com/apidojo/api/shazam',
+                    'latency_ms': latency_ms
+                }), 503
+            
             return jsonify({
                 'success': False,
-                'error': result.get('error', 'Unknown error'),
-                'message': result.get('message', ''),
+                'error': error_msg,
+                'message': message,
                 'latency_ms': latency_ms
             }), 500
             
     except Exception as e:
+        print(f"Exception in identify_music: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/search-music', methods=['POST'])

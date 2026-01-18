@@ -5,111 +5,91 @@ from typing import List, Dict, Any, Tuple
 import base64
 
 class FaceDetector:
-    """Face detection and analysis using MediaPipe and OpenCV"""
+    """Face detection and analysis using OpenCV Haar Cascade"""
     
     def __init__(self):
-        self.mp_face_detection = mp.solutions.face_detection
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=1, 
-            min_detection_confidence=0.5
-        )
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=5,
-            min_detection_confidence=0.5
-        )
+        # Use OpenCV's Haar Cascade for face detection (stable, no model file dependencies)
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     
     def detect_faces(self, image_array: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Detect faces in an image and return detailed information
+        Detect faces in an image and return detailed information using OpenCV
         
         Args:
-            image_array: numpy array of the image (RGB)
+            image_array: numpy array of the image (BGR)
             
         Returns:
             List of detected faces with bounding boxes and features
         """
         height, width, _ = image_array.shape
         
-        # Convert BGR to RGB for MediaPipe
-        rgb_image = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+        # Convert to grayscale for Haar Cascade
+        gray = cv2.cvtColor(image_array, cv2.COLOR_BGR2GRAY)
         
         # Detect faces
-        results = self.face_detection.process(rgb_image)
+        detected_faces_cv = self.face_cascade.detectMultiScale(
+            gray, 
+            scaleFactor=1.1, 
+            minNeighbors=5, 
+            minSize=(30, 30)
+        )
         
         faces = []
-        if results.detections:
-            for idx, detection in enumerate(results.detections):
-                # Get bounding box
-                bbox = detection.location_data.relative_bounding_box
-                x = int(bbox.xmin * width)
-                y = int(bbox.ymin * height)
-                w = int(bbox.width * width)
-                h = int(bbox.height * height)
-                
-                # Ensure coordinates are within image bounds
-                x = max(0, x)
-                y = max(0, y)
-                w = min(w, width - x)
-                h = min(h, height - y)
-                
-                # Extract face region for analysis
-                face_region = image_array[y:y+h, x:x+w] if h > 0 and w > 0 else image_array
-                
-                # Analyze face features
-                features = self._analyze_face_features(face_region)
-                
-                faces.append({
-                    'id': idx,
-                    'bbox': {
-                        'x': x,
-                        'y': y,
-                        'width': w,
-                        'height': h
-                    },
-                    'confidence': detection.score[0],
-                    'features': features
-                })
+        for idx, (x, y, w, h) in enumerate(detected_faces_cv):
+            # Ensure coordinates are within image bounds
+            x = max(0, x)
+            y = max(0, y)
+            w = min(w, width - x)
+            h = min(h, height - y)
+            
+            # Extract face region for analysis
+            face_region = image_array[y:y+h, x:x+w] if h > 0 and w > 0 else image_array
+            
+            # Analyze face features
+            features = self._analyze_face_features(face_region)
+            
+            faces.append({
+                'id': idx,
+                'bbox': {
+                    'x': int(x),
+                    'y': int(y),
+                    'width': int(w),
+                    'height': int(h)
+                },
+                'confidence': 0.9,  # Haar Cascade doesn't provide confidence
+                'features': features
+            })
         
         return faces
     
     def detect_landmarks(self, image_array: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Detect facial landmarks using MediaPipe Face Mesh
+        Detect facial landmarks (simplified for compatibility)
         
         Args:
-            image_array: numpy array of the image (RGB)
+            image_array: numpy array of the image (BGR)
             
         Returns:
-            List of faces with landmark coordinates
+            List of faces with landmark coordinates (simplified)
         """
-        height, width, _ = image_array.shape
-        rgb_image = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-        
-        results = self.face_mesh.process(rgb_image)
-        
+        # For now, just return face regions since MediaPipe API changed
+        faces = self.detect_faces(image_array)
         faces_with_landmarks = []
-        if results.multi_face_landmarks:
-            for idx, face_landmarks in enumerate(results.multi_face_landmarks):
-                # Extract key landmarks
-                landmarks = []
-                for landmark in face_landmarks.landmark:
-                    landmarks.append({
-                        'x': landmark.x,
-                        'y': landmark.y,
-                        'z': landmark.z
-                    })
-                
-                # Calculate face orientation
-                orientation = self._calculate_face_orientation(landmarks, width, height)
-                
-                faces_with_landmarks.append({
-                    'id': idx,
-                    'landmark_count': len(landmarks),
-                    'orientation': orientation,
-                    'key_points': self._extract_key_points(landmarks, width, height)
-                })
+        
+        for face in faces:
+            bbox = face['bbox']
+            # Simple landmark approximation based on bounding box
+            landmarks = {
+                'left_eye': {'x': bbox['x'] + bbox['width'] * 0.3, 'y': bbox['y'] + bbox['height'] * 0.4},
+                'right_eye': {'x': bbox['x'] + bbox['width'] * 0.7, 'y': bbox['y'] + bbox['height'] * 0.4},
+                'nose': {'x': bbox['x'] + bbox['width'] * 0.5, 'y': bbox['y'] + bbox['height'] * 0.5},
+                'mouth': {'x': bbox['x'] + bbox['width'] * 0.5, 'y': bbox['y'] + bbox['height'] * 0.7}
+            }
+            faces_with_landmarks.append({
+                'id': face['id'],
+                'bbox': bbox,
+                'landmarks': landmarks
+            })
         
         return faces_with_landmarks
     
